@@ -93,56 +93,6 @@ def run_step(cmd: list[str], *, dry_run: bool, timeout: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# dovi_tool CLI resolution
-#
-# dovi_tool's flag to drop the enhancement layer differs across versions
-# (modern builds use --discard; some docs/older builds use --drop-el), and the
-# mode option may be global (`dovi_tool -m 2 convert`) or a convert option
-# (`dovi_tool convert --mode 2`). We resolve both from the actual binary's help
-# so we match whatever 2.3.2 ships, instead of hardcoding a guess.
-# --------------------------------------------------------------------------- #
-_convert_help: Optional[str] = None
-
-
-def _convert_help_text() -> str:
-    global _convert_help
-    if _convert_help is None:
-        try:
-            r = subprocess.run(
-                ["dovi_tool", "convert", "--help"],
-                capture_output=True, timeout=QUICK_TIMEOUT_SEC, check=False,
-            )
-            _convert_help = (r.stdout + r.stderr).decode("utf-8", errors="replace")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            _convert_help = ""
-    return _convert_help
-
-
-def _drop_el_flag() -> str:
-    help_text = _convert_help_text()
-    if "--drop-el" in help_text:
-        return "--drop-el"
-    return "--discard"  # dovi_tool 2.3.2 default
-
-
-def build_convert_cmd(rpu_in: Path, rpu_out: Path, el_type: str) -> list[str]:
-    """dovi_tool command to convert an extracted RPU to Profile 8.1.
-
-    FEL sources drop the (real) enhancement layer; MEL sources do not.
-    """
-    help_text = _convert_help_text()
-    # Mode placement: prefer the convert-subcommand form if it advertises it.
-    if "--mode" in help_text or " -m" in help_text:
-        cmd = ["dovi_tool", "convert", "--mode", "2"]
-    else:
-        cmd = ["dovi_tool", "-m", "2", "convert"]
-    if el_type == "FEL":
-        cmd.append(_drop_el_flag())
-    cmd += [str(rpu_in), "-o", str(rpu_out)]
-    return cmd
-
-
-# --------------------------------------------------------------------------- #
 # Probing
 # --------------------------------------------------------------------------- #
 def mkvmerge_identify(path: Path) -> Optional[dict]:
@@ -274,25 +224,24 @@ def process_file(input_path: Path, dry_run: bool) -> Result:
     with tempfile.TemporaryDirectory(prefix="dovi8_") as tmp:
         tmpd = Path(tmp)
         hevc = tmpd / "video.hevc"
-        rpu = tmpd / "rpu.bin"
-        rpu_p81 = tmpd / "rpu_p81.bin"
-        hevc_p81 = tmpd / "video_p81.hevc"
+        converted_hevc = tmpd / "video_p81.hevc"
+
+        # dovi_tool convert does the RPU work end-to-end on the HEVC stream.
+        # FEL sources add --discard to drop the (real) enhancement layer; MEL
+        # sources convert without it.
+        convert_cmd = ["dovi_tool", "convert"]
+        if el_type == "FEL":
+            convert_cmd.append("--discard")
+        convert_cmd += ["-i", str(hevc), "-o", str(converted_hevc)]
 
         steps: list[tuple[str, list[str], int]] = [
             ("extract HEVC",
              ["mkvextract", str(input_path), "tracks", f"{video_id}:{hevc}"],
              HEAVY_TIMEOUT_SEC),
-            ("extract RPU",
-             ["dovi_tool", "extract-rpu", str(hevc), "-o", str(rpu)],
+            ("convert HEVC -> 8.1",
+             convert_cmd,
              HEAVY_TIMEOUT_SEC),
-            ("convert RPU -> 8.1",
-             build_convert_cmd(rpu, rpu_p81, el_type),
-             QUICK_TIMEOUT_SEC),
-            ("inject RPU",
-             ["dovi_tool", "inject-rpu", "-i", str(hevc),
-              "--rpu-in", str(rpu_p81), "-o", str(hevc_p81)],
-             HEAVY_TIMEOUT_SEC),
-            ("remux", _build_remux_cmd(input_path, hevc_p81, output_path, reflag),
+            ("remux", _build_remux_cmd(input_path, converted_hevc, output_path, reflag),
              HEAVY_TIMEOUT_SEC),
         ]
 
@@ -320,7 +269,7 @@ def process_file(input_path: Path, dry_run: bool) -> Result:
     return Result(label, "success", "", el_type, reflag.needed)
 
 
-def _build_remux_cmd(input_path: Path, hevc_p81: Path, output_path: Path,
+def _build_remux_cmd(input_path: Path, converted_hevc: Path, output_path: Path,
                      reflag: ReflagPlan) -> list[str]:
     cmd = ["mkvmerge", "-o", str(output_path)]
     if reflag.needed:
@@ -334,7 +283,7 @@ def _build_remux_cmd(input_path: Path, hevc_p81: Path, output_path: Path,
     cmd += [
         "--no-audio", "--no-subtitles", "--no-chapters",
         "--no-attachments", "--no-track-tags", "--no-global-tags",
-        str(hevc_p81),
+        str(converted_hevc),
     ]
     return cmd
 
