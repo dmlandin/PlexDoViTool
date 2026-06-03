@@ -16,9 +16,12 @@ ARG DOVI_TOOL_VERSION=2.3.2
 RUN curl -fsSL \
       "https://github.com/quietvoid/dovi_tool/releases/download/${DOVI_TOOL_VERSION}/dovi_tool-${DOVI_TOOL_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       -o /tmp/dovi_tool.tar.gz \
- && tar -xzf /tmp/dovi_tool.tar.gz -C /usr/local/bin dovi_tool \
+ && mkdir -p /tmp/dovi_extract \
+ && tar -xzf /tmp/dovi_tool.tar.gz -C /tmp/dovi_extract \
+ && find /tmp/dovi_extract -type f -name dovi_tool -exec mv {} /usr/local/bin/dovi_tool \; \
  && chmod +x /usr/local/bin/dovi_tool \
- && rm /tmp/dovi_tool.tar.gz \
+ && rm -rf /tmp/dovi_tool.tar.gz /tmp/dovi_extract \
+ && test -x /usr/local/bin/dovi_tool \
  && dovi_tool --version
 
 RUN pip install --no-cache-dir pyyaml==6.0.2
