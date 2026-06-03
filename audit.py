@@ -18,8 +18,10 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,69 +137,104 @@ def _as_int(value) -> Optional[int]:
         return None
 
 
+# Matches dovi_tool 2.3.2 `info -s` output, e.g. "Profile: 7 (MEL)".
+_EL_TYPE_RE = re.compile(r"profile:\s*7\s*\((fel|mel)\)", re.IGNORECASE)
+
+
 def probe_el_type(path: Path) -> tuple[Optional[str], str]:
-    """Determine FEL vs MEL for a Profile 7 file via an ffmpeg->dovi_tool pipe.
+    """Determine FEL vs MEL for a Profile 7 file.
+
+    Two-step dovi_tool pipeline (``info`` needs a pre-extracted RPU, not raw
+    HEVC): ffmpeg pipes the first 30s of HEVC into ``dovi_tool extract-rpu``,
+    then ``dovi_tool info -s`` summarizes the extracted RPU and we parse the
+    "Profile: 7 (FEL|MEL)" line.
 
     Returns (el_type, note) where el_type is "FEL", "MEL", or None. Never
-    raises and never writes to the library — the HEVC stream is piped, not
-    extracted to disk.
+    raises and never writes to the library — the HEVC is piped and the only
+    file written is a container-local temp RPU under /tmp (TMPDIR), which is
+    cleaned up before returning.
     """
-    ffmpeg_cmd = [
-        "ffmpeg", "-loglevel", "error",
-        # -t before -i limits how much of the INPUT ffmpeg reads. FEL/MEL is
-        # stream-wide, so the first 30s carries more than enough RPU data and
-        # we avoid reading the entire 60-90 GB file. If a clearly-Profile-7
-        # file comes back DV_UNKNOWN, dovi_tool needed more frames: bump to 60.
-        "-t", "30",
-        "-i", str(path),
-        "-map", "0:v:0", "-c", "copy",
-        "-bsf:v", "hevc_mp4toannexb",
-        "-f", "hevc", "-",
-    ]
-    dovi_cmd = ["dovi_tool", "info", "-i", "-", "-s"]
-
+    fd, rpu_path = tempfile.mkstemp(suffix=".bin")
+    os.close(fd)
     try:
-        ff = subprocess.Popen(
-            ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-    except FileNotFoundError:
-        return None, "ffmpeg_not_found"
+        # Step 1: ffmpeg (first 30s) | dovi_tool extract-rpu - -o <tempfile>
+        ffmpeg_cmd = [
+            "ffmpeg", "-loglevel", "error",
+            # -t before -i limits how much of the INPUT ffmpeg reads. FEL/MEL is
+            # stream-wide, so the first 30s carries more than enough RPU data and
+            # we avoid reading the entire 60-90 GB file. If a clearly-Profile-7
+            # file comes back DV_UNKNOWN, dovi_tool needed more frames: bump to 60.
+            "-t", "30",
+            "-i", str(path),
+            "-map", "0:v:0", "-c", "copy",
+            "-bsf:v", "hevc_mp4toannexb",
+            "-f", "hevc", "-",
+        ]
+        extract_cmd = ["dovi_tool", "extract-rpu", "-", "-o", rpu_path]
 
-    try:
-        dv = subprocess.Popen(
-            dovi_cmd,
-            stdin=ff.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-    except FileNotFoundError:
+        try:
+            ff = subprocess.Popen(
+                ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+        except FileNotFoundError:
+            return None, "ffmpeg_not_found"
+
+        try:
+            extract = subprocess.Popen(
+                extract_cmd,
+                stdin=ff.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except FileNotFoundError:
+            if ff.stdout:
+                ff.stdout.close()
+            ff.kill()
+            ff.wait()
+            return None, "dovi_tool_not_found"
+
+        # Let ffmpeg receive SIGPIPE if extract-rpu exits early.
         if ff.stdout:
             ff.stdout.close()
-        ff.kill()
-        ff.wait()
-        return None, "dovi_tool_not_found"
 
-    # Let ffmpeg receive SIGPIPE if dovi_tool exits early.
-    if ff.stdout:
-        ff.stdout.close()
+        try:
+            extract.communicate(timeout=DOVI_INFO_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            extract.kill()
+            ff.kill()
+            extract.wait()
+            ff.wait()
+            return None, "rpu_extract_failed"
+        finally:
+            ff.wait()
 
-    try:
-        out, _ = dv.communicate(timeout=DOVI_INFO_TIMEOUT_SEC)
-    except subprocess.TimeoutExpired:
-        dv.kill()
-        ff.kill()
-        dv.wait()
-        ff.wait()
-        return None, "dovi_tool_timeout"
+        if extract.returncode != 0:
+            return None, "rpu_extract_failed"
+
+        # Step 2: dovi_tool info -i <tempfile> -s
+        info_cmd = ["dovi_tool", "info", "-i", rpu_path, "-s"]
+        try:
+            info = subprocess.run(
+                info_cmd,
+                capture_output=True,
+                timeout=DOVI_INFO_TIMEOUT_SEC,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None, "dovi_info_failed"
+        if info.returncode != 0:
+            return None, "dovi_info_failed"
+
+        text = info.stdout.decode("utf-8", errors="replace")
+        match = _EL_TYPE_RE.search(text)
+        if match:
+            return match.group(1).upper(), ""
+        return None, "el_type_undetermined"
     finally:
-        ff.wait()
-
-    text = (out or b"").decode("utf-8", errors="replace").lower()
-    if "fel" in text or "full enhancement" in text:
-        return "FEL", ""
-    if "mel" in text or "minimum enhancement" in text or "minimal enhancement" in text:
-        return "MEL", ""
-    return None, "el_type_undetermined"
+        try:
+            os.remove(rpu_path)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
