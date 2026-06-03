@@ -28,7 +28,11 @@ RUN pip install --no-cache-dir pyyaml==6.0.2
 
 WORKDIR /app
 COPY audit.py /app/audit.py
+COPY convert.py /app/convert.py
 COPY config.yaml /app/config.yaml
 
+# Default entrypoint runs Stage 1 (audit.py). Stage 2 (convert.py) shares this
+# image and is run by overriding the entrypoint:
+#   docker run --entrypoint python ... plex-dovi-tool /app/convert.py --file ...
 ENTRYPOINT ["python", "/app/audit.py"]
 CMD ["--config", "/app/config.yaml"]

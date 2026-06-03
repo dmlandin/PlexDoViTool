@@ -78,9 +78,75 @@ Written to `reports_dir` (i.e. your mounted `./reports`):
 - **`summary.txt`** — per-library and grand-total counts of each classification
   (also printed to stdout).
 
-## What's next
+## Stage 2 — conversion (`convert.py`)
 
-**Stage 2 is not yet built.** It will losslessly convert the `DV7_FEL` / `DV7_MEL`
-files to Profile 8.1 (extract HEVC, convert the RPU with `dovi_tool`, reinject,
-and remux to a **new** MKV in a separate output directory — never overwriting the
-original). Stage 1 output should be reviewed against real files first.
+`convert.py` losslessly converts the `DV7_FEL` / `DV7_MEL` files found by Stage 1
+from Profile 7 to Profile 8.1. For each input it extracts the HEVC, extracts and
+converts the RPU with `dovi_tool` (dropping the enhancement layer for FEL),
+reinjects the converted RPU, and remuxes into a **new** file named
+`<original>.dovi8.mkv` **in the same folder** as the original. The original is
+never modified, moved, or deleted.
+
+It also performs an **audio default-flag reflag** when (and only when) a file has
+a default TrueHD track alongside an English AC-3/E-AC-3 track: in the remux it
+clears the TrueHD default and makes the English AC-3 the default. Files without
+that pattern keep their source audio flags untouched.
+
+> ⚠️ **Stage 2 mounts `/media/movies` READ-WRITE** (no `:ro`), because the
+> converted `.dovi8.mkv` files are written alongside the originals. This differs
+> from Stage 1, which is read-only.
+
+`convert.py` is **not** the image entrypoint (Stage 1's `audit.py` is). Run it by
+overriding the entrypoint with `--entrypoint python`.
+
+### Dry run first
+
+Always dry-run a file first. `--dry-run` prints the exact commands that would run
+(extract / convert / inject / remux) and executes nothing:
+
+```sh
+docker run --rm \
+  --entrypoint python \
+  -v /mnt/user/Movies:/media/movies \
+  -v $(pwd)/reports:/reports \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  plex-dovi-tool \
+  /app/convert.py --file "/media/movies/Movie Folder/Movie Remux-2160p.mkv" --dry-run
+```
+
+### Convert a single file
+
+Drop `--dry-run` to actually convert:
+
+```sh
+docker run --rm \
+  --entrypoint python \
+  -v /mnt/user/Movies:/media/movies \
+  -v $(pwd)/reports:/reports \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  plex-dovi-tool \
+  /app/convert.py --file "/media/movies/Movie Folder/Movie Remux-2160p.mkv"
+```
+
+### Convert from the Stage 1 worklist
+
+Process every `DV7_FEL` / `DV7_MEL` row in the worklist (everything else is
+skipped with a logged reason). Paths are reconstructed from each row's `library`
+column against `config.yaml`'s `library_roots`:
+
+```sh
+docker run --rm \
+  --entrypoint python \
+  -v /mnt/user/Movies:/media/movies \
+  -v $(pwd)/reports:/reports \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  plex-dovi-tool \
+  /app/convert.py --worklist /reports/worklist.csv --dry-run
+```
+
+Processing is sequential, one file at a time. Each run writes a timestamped
+`convert.log` to the reports directory and prints a final summary (processed /
+succeeded / failed / skipped). After a successful conversion the output is
+verified to report `dv_profile=8` and to be within ±5% of the original size; a
+failed verification is logged loudly but the output is left in place for
+inspection.
