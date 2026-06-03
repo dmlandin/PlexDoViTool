@@ -28,10 +28,11 @@ from typing import Optional
 import yaml
 
 FFPROBE_TIMEOUT_SEC = 60
-# dovi_tool has to read the entire HEVC elementary stream piped from ffmpeg.
-# For a UHD remux that can be tens of GB, so allow plenty of time while still
-# bounding a genuine hang.
-DOVI_INFO_TIMEOUT_SEC = 1800
+# FEL vs MEL is a stream-wide property of a Profile 7 file (every RPU is the
+# same type), so we only feed dovi_tool the first 30s of HEVC (see the `-t`
+# flag in probe_el_type) instead of the whole 60-90 GB stream. With the input
+# bounded, 2 minutes is plenty for dovi_tool to process the truncated stream.
+DOVI_INFO_TIMEOUT_SEC = 120
 
 # Classifications.
 CLASS_NO_DV = "NO_DV"
@@ -143,6 +144,11 @@ def probe_el_type(path: Path) -> tuple[Optional[str], str]:
     """
     ffmpeg_cmd = [
         "ffmpeg", "-loglevel", "error",
+        # -t before -i limits how much of the INPUT ffmpeg reads. FEL/MEL is
+        # stream-wide, so the first 30s carries more than enough RPU data and
+        # we avoid reading the entire 60-90 GB file. If a clearly-Profile-7
+        # file comes back DV_UNKNOWN, dovi_tool needed more frames: bump to 60.
+        "-t", "30",
         "-i", str(path),
         "-map", "0:v:0", "-c", "copy",
         "-bsf:v", "hevc_mp4toannexb",
