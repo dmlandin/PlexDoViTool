@@ -1,0 +1,22 @@
+# PlexDoViTool — Stage 1 (read-only Dolby Vision audit) configuration.
+#
+# Paths below are the IN-CONTAINER paths. Mount your host media into these
+# locations (read-only) when running:
+#
+#   docker run --rm \
+#     -v /mnt/user/Movies:/media/movies:ro \
+#     -v $(pwd)/reports:/reports \
+#     -v $(pwd)/config.yaml:/app/config.yaml:ro \
+#     plex-dovi-tool
+
+library_roots:
+  - name: Movies
+    path: /media/movies
+
+# Only MKV is relevant for the DV Profile 7 -> 8.1 work.
+scan_extensions:
+  - .mkv
+
+reports_dir: /reports
+
+# Stage 1 needs no dovi_tool conversion rules; FEL/MEL is read-only info probing.
