@@ -6,8 +6,8 @@ For each input MKV this:
   1. Re-determines FEL vs MEL (same logic as Stage 1's audit.py).
   2. Detects whether an audio default-flag reflag is needed (a default
      TrueHD track with an English AC-3/E-AC-3 sibling).
-  3. Plans: extract HEVC -> extract RPU -> convert RPU to 8.1 -> inject RPU
-     -> remux into a NEW "<name>.dovi8.mkv" alongside the original.
+  3. Plans: extract HEVC -> convert HEVC to 8.1 -> remux into a NEW
+     "<name>.dovi8.mkv" alongside the original.
   4. Executes (or, with --dry-run, only prints the planned commands).
   5. Verifies the output reports dv_profile=8 and is within +/-5% of the
      original size.
@@ -227,12 +227,14 @@ def process_file(input_path: Path, dry_run: bool) -> Result:
         converted_hevc = tmpd / "video_p81.hevc"
 
         # dovi_tool convert does the RPU work end-to-end on the HEVC stream.
-        # FEL sources add --discard to drop the (real) enhancement layer; MEL
-        # sources convert without it.
-        convert_cmd = ["dovi_tool", "convert"]
-        if el_type == "FEL":
-            convert_cmd.append("--discard")
-        convert_cmd += ["-i", str(hevc), "-o", str(converted_hevc)]
+        # -m 2 selects Profile 8.1 conversion mode -- without it dovi_tool
+        # copies the RPU untouched and the output stays Profile 7. --discard
+        # drops the enhancement layer, required for ALL Profile 7 sources since
+        # 8.1 is single-layer (el_type is logged for info only, not used here).
+        convert_cmd = [
+            "dovi_tool", "-m", "2", "convert", "--discard",
+            "-i", str(hevc), "-o", str(converted_hevc),
+        ]
 
         steps: list[tuple[str, list[str], int]] = [
             ("extract HEVC",
