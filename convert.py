@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """PlexDoViTool — Stage 2: lossless Dolby Vision Profile 7 -> Profile 8.1.
 
@@ -9,8 +10,9 @@ For each input MKV this:
   3. Plans: extract HEVC -> convert HEVC to 8.1 -> remux into a NEW
      "<name>.dovi8.mkv" alongside the original.
   4. Executes (or, with --dry-run, only prints the planned commands).
-  5. Verifies the output reports dv_profile=8 and is within +/-5% of the
-     original size.
+  5. Verifies the output reports dv_profile=8 and is within an EL-type-aware
+     size tolerance of the original (tight for MEL; looser for FEL, whose
+     dropped enhancement layer legitimately shrinks the file).
 
 The ORIGINAL file is never modified, moved, or deleted. All intermediates
 live in a per-file temp dir that is auto-cleaned even on error. A failure on
@@ -46,7 +48,8 @@ import audit
 
 DEFAULT_CONFIG = "/app/config.yaml"
 LOG_FILENAME = "convert.log"
-SIZE_TOLERANCE = 0.05  # +/-5% output-vs-original size sanity check
+SIZE_TOLERANCE_MEL = 0.05  # MEL barely shrinks; tight bound
+SIZE_TOLERANCE_FEL = 0.25  # FEL legitimately drops up to ~20%
 
 DV7_CLASSES = {"DV7_FEL", "DV7_MEL"}
 
@@ -261,7 +264,7 @@ def process_file(input_path: Path, dry_run: bool) -> Result:
                 return Result(label, "failed", f"{name}_failed", el_type, reflag.needed)
 
     # Step 5: verify (real run only).
-    ok, reason = _verify_output(input_path, output_path)
+    ok, reason = _verify_output(input_path, output_path, el_type)
     if not ok:
         # Leave the output in place for inspection; just flag loudly.
         log.error("  VERIFICATION FAILED (%s): %s", reason, output_path)
@@ -299,7 +302,7 @@ def _cleanup_partial(output_path: Path) -> None:
         log.warning("  could not remove partial output %s: %s", output_path, e)
 
 
-def _verify_output(input_path: Path, output_path: Path) -> tuple[bool, str]:
+def _verify_output(input_path: Path, output_path: Path, el_type: str) -> tuple[bool, str]:
     if not output_path.is_file():
         return False, "missing"
     probe = audit.run_ffprobe(output_path)
@@ -315,9 +318,11 @@ def _verify_output(input_path: Path, output_path: Path) -> tuple[bool, str]:
         new = output_path.stat().st_size
     except OSError:
         return False, "stat_failed"
-    if orig > 0 and abs(new - orig) / orig > SIZE_TOLERANCE:
-        log.error("  size drift %.1f%% (orig=%d new=%d)",
-                  100 * (new - orig) / orig, orig, new)
+    tolerance = SIZE_TOLERANCE_FEL if el_type == "FEL" else SIZE_TOLERANCE_MEL
+    if orig > 0 and abs(new - orig) / orig > tolerance:
+        log.error("  size drift %.1f%% exceeds %s tolerance (%.0f%%) (orig=%d new=%d)",
+                  100 * (new - orig) / orig, el_type, tolerance * 100,
+                  orig, new)
         return False, "size_drift"
     return True, ""
 
